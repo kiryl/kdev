@@ -1,4 +1,4 @@
-# linux-dev-env
+# kdev
 
 A Nix flake for Linux kernel development: fast VM boot of user-built kernels,
 cross-compile shells for every arch kbuild CI covers, and debug tooling.
@@ -53,13 +53,13 @@ If you use `direnv` with `nix-direnv`, drop this at the root of your kernel
 work area (e.g. `~/linux/.envrc`):
 
 ```sh
-use flake ~/git/linux-dev-env
+use flake ~/git/kdev
 ```
 
 Then `cd` into any worktree (e.g. `~/linux/<worktree>`) auto-enters the default shell — `kdev`,
 `drgn`, `gdb`, `bpftrace`, the qemu binaries, and every native kbuild dep
 are on `PATH`. Subsequent examples in this README use `kdev` directly
-assuming this layer is active; `nix run ~/git/linux-dev-env#vm` is the
+assuming this layer is active; `nix run ~/git/kdev#vm` is the
 equivalent if it isn't.
 
 For cross-compiling the same tree to multiple arches without swapping
@@ -74,7 +74,7 @@ going through `make`):
 
 ```sh
 # <kernel-tree>/build-aarch64/.envrc
-use flake ~/git/linux-dev-env#aarch64
+use flake ~/git/kdev#aarch64
 ```
 
 One-liner to scaffold all eight (run inside a given worktree):
@@ -83,7 +83,7 @@ One-liner to scaffold all eight (run inside a given worktree):
 for arch in aarch64 riscv powerpc64 powerpc64le loongarch64 mips64 s390x arm; do
   dir=build-$arch
   mkdir -p "$dir"
-  echo "use flake ~/git/linux-dev-env#$arch" > "$dir/.envrc"
+  echo "use flake ~/git/kdev#$arch" > "$dir/.envrc"
   direnv allow "$dir"
 done
 ```
@@ -96,7 +96,7 @@ Edits to `kdev.nix`, `vm.nix`, or `checks.nix` alone won't trigger a
 reload, so your shell will keep running the old `kdev`. Fix:
 
 ```sh
-touch ~/git/linux-dev-env/flake.nix
+touch ~/git/kdev/flake.nix
 ```
 
 Next `cd` into the tree re-evaluates. Alternatively, add the files to the
@@ -104,10 +104,10 @@ watch list so any source edit invalidates the cache:
 
 ```sh
 # in ~/linux/.envrc, after `use flake ...`
-nix_direnv_watch_file ~/git/linux-dev-env/flake.nix \
-                      ~/git/linux-dev-env/kdev.nix \
-                      ~/git/linux-dev-env/vm.nix \
-                      ~/git/linux-dev-env/checks.nix
+nix_direnv_watch_file ~/git/kdev/flake.nix \
+                      ~/git/kdev/kdev.nix \
+                      ~/git/kdev/vm.nix \
+                      ~/git/kdev/checks.nix
 ```
 
 Kernel boot prerequisites:
@@ -143,7 +143,7 @@ make -j$(nproc) && kdev
 Without direnv:
 
 ```sh
-make -j$(nproc) && nix run ~/git/linux-dev-env#vm
+make -j$(nproc) && nix run ~/git/kdev#vm
 ```
 
 Exit the VM with `Ctrl-a x` (qemu monitor escape).
@@ -484,7 +484,7 @@ If you'd rather have the cross gcc on `PATH` directly (not behind `make`),
 switch to the matching devShell:
 
 ```sh
-nix develop ~/git/linux-dev-env#aarch64
+nix develop ~/git/kdev#aarch64
 # or per-build-dir .envrc — see "direnv integration"
 ```
 

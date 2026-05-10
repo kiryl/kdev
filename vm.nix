@@ -94,7 +94,7 @@
   # exit code to <dir>/exit, then powers off. kdev on the host stages
   # the script under $HOME/var/.kdev-run/<id>/ and reads back the result.
   systemd.services.kdev-run = {
-    description = "linux-dev-env test-case runner (kdev.run=<dir>)";
+    description = "kdev test-case runner (kdev.run=<dir>)";
     wantedBy = [ "multi-user.target" ];
     after = [ "multi-user.target" ];
     unitConfig.ConditionKernelCommandLine = "kdev.run";
