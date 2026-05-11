@@ -24,6 +24,18 @@
         modules = [ ./vm.nix ];
       };
 
+      flake.templates =
+        let
+          kernel-workspace = {
+            path = ./templates/kernel-workspace;
+            description = "direnv + CLAUDE.md scaffold for a kernel worktree area";
+          };
+        in
+        {
+          inherit kernel-workspace;
+          default = kernel-workspace;
+        };
+
       perSystem =
         { pkgs, lib, ... }:
         let

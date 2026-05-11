@@ -62,6 +62,20 @@ are on `PATH`. Subsequent examples in this README use `kdev` directly
 assuming this layer is active; `nix run ~/git/kdev#vm` is the
 equivalent if it isn't.
 
+For a one-step scaffold (`.envrc` + a `CLAUDE.md` digest of the tooling
+on PATH, automation patterns, and the required kernel configs), use the
+flake template:
+
+```sh
+cd ~/linux           # or wherever your kernel worktrees live
+nix flake init -t ~/git/kdev#kernel-workspace
+direnv allow
+```
+
+The generated `CLAUDE.md` is auto-loaded by Claude Code for any session
+launched under that directory, so any Claude working in a worktree
+discovers the harness without needing to be re-briefed.
+
 For cross-compiling the same tree to multiple arches without swapping
 shells, the default shell ships one `kmake-<arch>` wrapper per cross
 target — see [cross compilation](#cross-compilation) below. These work
