@@ -86,6 +86,33 @@
             kdev
           ];
 
+          # Toolchain + libs for building userspace test cases that will
+          # run inside the kernel-vm guest. Same nixpkgs as the guest, so
+          # binaries' /nix/store interpreter paths already exist in the
+          # guest closure -> no host/guest glibc drift.
+          testBuildDeps = with pkgs; [
+            gcc
+            clang
+            lld
+            gnumake
+            pkg-config
+            bintools
+            patchelf
+            python3
+          ];
+          testRuntimeDeps = with pkgs; [
+            libcap
+            libelf
+            elfutils
+            zlib
+            numactl
+            libaio
+            liburing
+            libmnl
+            libnl
+            openssl
+          ];
+
           syz = import ./syz.nix {
             inherit pkgs vmImage vmImageFileName;
             inherit (pkgs) syzkaller;
@@ -207,10 +234,20 @@
                   syz.kmake-syz
                 ];
             };
+            test-tools = pkgs.mkShell {
+              name = "kdev-test-tools";
+              nativeBuildInputs = testBuildDeps;
+              buildInputs = testRuntimeDeps;
+            };
           } // lib.mapAttrs mkCrossShell crossArches;
 
           checks = import ./checks.nix {
-            inherit pkgs kdev kmakeWrappers;
+            inherit
+              pkgs
+              kdev
+              kmakeWrappers
+              testBuildDeps
+              ;
             syzConfigCheck = syz.config-check;
           };
         };

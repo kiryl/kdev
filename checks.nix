@@ -2,6 +2,7 @@
   pkgs,
   kdev,
   kmakeWrappers,
+  testBuildDeps,
   syzConfigCheck,
 }:
 let
@@ -245,6 +246,29 @@ in
       mkdir -p $out
       cp vars.txt result.txt $out/
     '';
+
+  test-tools-interp-matches-pkgs-glibc =
+    runCommand "test-tools-interp-matches-pkgs-glibc"
+      {
+        nativeBuildInputs = testBuildDeps;
+      }
+      ''
+        set -euo pipefail
+        echo 'int main(void) { return 0; }' > t.c
+        gcc -o t t.c
+        interp=$(patchelf --print-interpreter t)
+        echo "interpreter: $interp"
+        case "$interp" in
+          ${pkgs.glibc}/*) ;;
+          *)
+            echo "FAIL: interp=$interp is not under ${pkgs.glibc}"
+            echo "      (host-built test binary would link a glibc the guest doesn't have)"
+            exit 1
+            ;;
+        esac
+        mkdir -p $out
+        : > $out/ok
+      '';
 
   syz-config-check-rejects-bad = runCommand "syz-config-check-rejects-bad" { } ''
     set -euo pipefail
