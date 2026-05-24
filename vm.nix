@@ -2,8 +2,13 @@
   pkgs,
   lib,
   modulesPath,
+  kdevArch ? "x86_64",
   ...
 }:
+let
+  serialConsole =
+    if kdevArch == "aarch64" then "ttyAMA0,115200" else "ttyS0,115200";
+in
 {
   imports = [
     "${modulesPath}/virtualisation/disk-image.nix"
@@ -13,7 +18,7 @@
   virtualisation.diskSize = 32 * 1024;
 
   boot.kernelParams = [
-    "console=ttyS0,115200"
+    "console=${serialConsole}"
     "console=tty0"
   ];
 

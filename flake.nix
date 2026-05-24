@@ -21,6 +21,17 @@
 
       flake.nixosConfigurations.kernel-vm = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
+        specialArgs = {
+          kdevArch = "x86_64";
+        };
+        modules = [ ./vm.nix ];
+      };
+
+      flake.nixosConfigurations.kernel-vm-aarch64 = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+        specialArgs = {
+          kdevArch = "aarch64";
+        };
         modules = [ ./vm.nix ];
       };
 
@@ -43,6 +54,25 @@
           vmImage = vmCfg.system.build.image;
           vmImageFileName = vmCfg.image.filePath;
           kdev = pkgs.callPackage ./kdev.nix { inherit vmImage vmImageFileName; };
+
+          vmCfgAarch64 = self.nixosConfigurations.kernel-vm-aarch64.config;
+          vmImageAarch64 = vmCfgAarch64.system.build.image;
+          vmImageAarch64FileName = vmCfgAarch64.image.filePath;
+          # Don't bake the aarch64 image into the script — image build needs
+          # binfmt-misc on the host. The launcher below carries the dep.
+          kdevAarch64 = pkgs.callPackage ./kdev.nix {
+            vmImage = null;
+            vmImageFileName = null;
+            arch = "aarch64";
+          };
+          kdevAarch64Launcher = pkgs.writeShellApplication {
+            name = "kdev-aarch64-vm";
+            runtimeInputs = [ kdevAarch64 ];
+            text = ''
+              export KDEV_VM_IMAGE="${vmImageAarch64}/${vmImageAarch64FileName}"
+              exec kdev-aarch64 "$@"
+            '';
+          };
 
           kernelNativeDeps = with pkgs; [
             bc
@@ -203,6 +233,8 @@
             vm-image = vmImage;
             kdev = kdev;
             default = kdev;
+            vm-image-aarch64 = vmImageAarch64;
+            kdev-aarch64 = kdevAarch64;
             syz-config-check = syz.config-check;
             syz-init = syz.init;
             kmake-syz = syz.kmake-syz;
@@ -211,6 +243,10 @@
           apps.vm = {
             type = "app";
             program = "${kdev}/bin/kdev";
+          };
+          apps.vm-aarch64 = {
+            type = "app";
+            program = "${kdevAarch64Launcher}/bin/kdev-aarch64-vm";
           };
           apps.syz-config-check = {
             type = "app";
@@ -245,6 +281,7 @@
             inherit
               pkgs
               kdev
+              kdevAarch64
               kmakeWrappers
               testBuildDeps
               ;

@@ -1,6 +1,7 @@
 {
   pkgs,
   kdev,
+  kdevAarch64,
   kmakeWrappers,
   testBuildDeps,
   syzConfigCheck,
@@ -13,6 +14,16 @@ let
     runCommand name { } ''
       set -euo pipefail
       KDEV=${kdev}/bin/kdev
+      ${script}
+      mkdir -p $out
+      : > $out/ok
+    '';
+
+  mkKdevAarch64Check =
+    name: script:
+    runCommand name { } ''
+      set -euo pipefail
+      KDEV=${kdevAarch64}/bin/kdev-aarch64
       ${script}
       mkdir -p $out
       : > $out/ok
@@ -195,6 +206,48 @@ in
       echo "expected non-zero exit without CONFIG_PVPANIC_PCI"; exit 1
     fi
     grep -q "CONFIG_PVPANIC_PCI" out.log
+  '';
+
+  kdev-aarch64-help = mkKdevAarch64Check "kdev-aarch64-help" ''
+    $KDEV --help > help.out
+    grep -q "Guest arch: aarch64" help.out
+    grep -q "qemu-system-aarch64" help.out
+    grep -q "arch/arm64/boot/Image" help.out
+  '';
+
+  kdev-aarch64-detects-arm64-image = mkKdevAarch64Check "kdev-aarch64-detects-arm64-image" ''
+    mkdir -p tree/arch/arm64/boot
+    : > tree/arch/arm64/boot/Image
+    : > tree/Kbuild
+    : > tree/MAINTAINERS
+    cd tree
+    # No image is configured, so we expect the script to detect the kernel
+    # successfully then abort at the rootfs-image check.
+    if $KDEV > ../out.log 2>&1; then
+      echo "expected non-zero exit when no rootfs image is set"; exit 1
+    fi
+    grep -q "no rootfs image set" ../out.log
+  '';
+
+  kdev-aarch64-ignores-x86-bzImage = mkKdevAarch64Check "kdev-aarch64-ignores-x86-bzImage" ''
+    mkdir -p tree/arch/x86/boot
+    : > tree/arch/x86/boot/bzImage
+    : > tree/Kbuild
+    : > tree/MAINTAINERS
+    cd tree
+    if $KDEV > ../out.log 2>&1; then
+      echo "expected non-zero exit when only an x86 bzImage exists"; exit 1
+    fi
+    grep -q "cannot auto-detect" ../out.log
+  '';
+
+  kdev-aarch64-requires-image = mkKdevAarch64Check "kdev-aarch64-requires-image" ''
+    : > fake-Image
+    if $KDEV --kernel $PWD/fake-Image > out.log 2>&1; then
+      echo "expected non-zero exit when no image is configured"; exit 1
+    fi
+    grep -q "no rootfs image set" out.log
+    grep -q "KDEV_VM_IMAGE" out.log
   '';
 
   cross-aarch64-produces-arm64-elf =

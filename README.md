@@ -19,8 +19,9 @@ cross-compile shells for every arch kbuild CI covers, and debug tooling.
 ## Requirements
 
 - Linux host with Nix + flakes enabled.
-- `/dev/kvm` accessible (VM uses KVM acceleration).
-- x86_64 host (VM image targets x86_64).
+- `/dev/kvm` accessible for x86_64 (the native VM uses KVM acceleration).
+- x86_64 host (the native VM image targets x86_64; the aarch64 image is
+  cross-built — see below).
 - A kernel worktree somewhere on the host. All tooling that takes a
   kernel path auto-detects by walking up from `$PWD` until it finds a
   tree root (`Kbuild` + `MAINTAINERS`), so it works from any worktree
@@ -143,6 +144,69 @@ listing what's missing if any share is active. Pass `--no-share-git
 --no-share-var` (and omit `--modules-install`) to skip the check.
 
 No initrd is used — required drivers must be built in, not modules.
+
+## Foreign-arch workflows (aarch64)
+
+Cross-arch emulation lets you boot an arm64 kernel under TCG on an x86_64
+host. Useful for experimenting with arch-specific features without arm64
+hardware.
+
+```sh
+# one-time: cross-build the aarch64 rootfs (heavy — see prerequisite below)
+nix build .#vm-image-aarch64
+
+# in your kernel tree
+kmake-aarch64 O=build-arm64 defconfig
+scripts/config --file build-arm64/.config --enable FUSE_FS --enable VIRTIO_FS
+kmake-aarch64 O=build-arm64 olddefconfig
+kmake-aarch64 O=build-arm64 -j$(nproc)
+
+# boot it (TCG; no KVM since host is x86)
+nix run ~/git/kdev#vm-aarch64
+```
+
+The aarch64 kdev (`kdev-aarch64`) auto-detects `arch/arm64/boot/Image` the
+same way the native variant finds `bzImage`. Cmdline rewrites
+`console=ttyS0` → `ttyAMA0`; qemu launches with `-machine virt,gic-version=3
+-cpu max`. All other features (`--gdb`, `--run`, `--crash-dump`,
+`--modules-install`, virtiofs shares) work unchanged.
+
+To use `kdev-aarch64` directly (e.g., from a script that already knows the
+image path):
+
+```sh
+nix run ~/git/kdev#kdev-aarch64 -- --image $(nix build --no-link --print-out-paths ~/git/kdev#vm-image-aarch64)/<filename>.qcow2 ...
+# or simpler — let the launcher resolve the image:
+nix run ~/git/kdev#vm-aarch64 -- --gdb-wait
+```
+
+Without `--image`/`$KDEV_VM_IMAGE`, the bare `kdev-aarch64` aborts with a
+pointer to `nix run .#vm-aarch64`.
+
+### Prerequisite: cross-building the aarch64 image
+
+`packages.vm-image-aarch64` is a full NixOS qcow2 built for aarch64-linux.
+On an x86_64 host you need one of:
+
+1. **binfmt-misc registered for aarch64** (recommended). On NixOS hosts,
+   add to `/etc/nixos/configuration.nix`:
+
+   ```nix
+   boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
+   ```
+
+   then `nixos-rebuild switch`. This registers qemu-user via binfmt so
+   Nix can transparently run aarch64 build scripts during the image build.
+
+2. **A remote aarch64 builder** configured in `nix.conf`.
+
+3. **Cache-only build** — if the entire closure is on Hydra, no execution
+   is needed. In practice the image's final assembly step usually requires
+   running aarch64 code, so binfmt is the most reliable path.
+
+Boot time under TCG is significantly slower than KVM-x86 (expect 10–30s to
+userspace depending on host CPU). Drop `--cores` / `--memory` to keep
+emulation overhead manageable.
 
 ## Native workflows
 
@@ -543,13 +607,23 @@ Run `nix run .#vm -- --help` for the full list. Key flags:
 
 - `devShells.default` — native build + full debug tools.
 - `devShells.<arch>` — cross-compile shell (see table above).
-- `packages.vm-image` — NixOS qcow2, produced by
+- `packages.vm-image` — NixOS qcow2 (x86_64), produced by
   `system.build.image` from `${nixpkgs}/nixos/modules/virtualisation/disk-image.nix`.
-- `packages.kdev` — the qemu wrapper shell script.
+- `packages.vm-image-aarch64` — cross-built aarch64 NixOS qcow2 (needs
+  binfmt-misc on the host; see *Foreign-arch workflows* above).
+- `packages.kdev` — the qemu wrapper shell script (x86_64).
+- `packages.kdev-aarch64` — qemu wrapper shell script targeting aarch64.
+  Image is supplied via `$KDEV_VM_IMAGE` or `--image`; the bare script
+  does not bake the image path so it builds without binfmt.
 - `packages.default` — alias for `kdev`.
 - `apps.vm` — `nix run .#vm` entry point.
+- `apps.vm-aarch64` — `nix run .#vm-aarch64` entry point. Thin wrapper
+  that sets `$KDEV_VM_IMAGE` to the cross-built aarch64 image and
+  execs `kdev-aarch64` — building this app triggers the image build.
 - `nixosConfigurations.kernel-vm` — the NixOS config that builds the
   rootfs. Edit `vm.nix` to add guest packages or settings.
+- `nixosConfigurations.kernel-vm-aarch64` — aarch64 variant of the same
+  config (consumes `vm.nix` with `kdevArch = "aarch64"`).
 - `packages.{syz-config-check,syz-init,kmake-syz}` and matching
   `apps.syz-*` — syzkaller helpers (see *Fuzzing with syzkaller*).
 - `checks.<arch>.*` — selftests, run with `nix flake check`.

@@ -1,17 +1,57 @@
 {
-  vmImage,
-  vmImageFileName,
+  vmImage ? null,
+  vmImageFileName ? null,
   writeShellApplication,
+  qemu,
   qemu_kvm,
   qemu-utils,
   virtiofsd,
   coreutils,
   socat,
+  arch ? "x86_64",
 }:
+let
+  hasEmbeddedImage = vmImage != null && vmImageFileName != null;
+  imageBaseLine =
+    if hasEmbeddedImage then
+      ''IMAGE_BASE="${vmImage}/${vmImageFileName}"''
+    else
+      ''IMAGE_BASE="''${KDEV_VM_IMAGE:-}"'';
+  archCfg =
+    if arch == "x86_64" then
+      {
+        binaryName = "kdev";
+        qemuPkg = qemu_kvm;
+        qemuBin = "qemu-system-x86_64";
+        console = "ttyS0";
+        kernelRelPath = "arch/x86/boot/bzImage";
+        kernelKind = "bzImage";
+        kvmCapable = true;
+        machineArgs = [ ];
+      }
+    else if arch == "aarch64" then
+      {
+        binaryName = "kdev-aarch64";
+        qemuPkg = qemu;
+        qemuBin = "qemu-system-aarch64";
+        console = "ttyAMA0";
+        kernelRelPath = "arch/arm64/boot/Image";
+        kernelKind = "Image";
+        kvmCapable = false;
+        machineArgs = [
+          "-machine"
+          "virt,gic-version=3"
+        ];
+      }
+    else
+      throw "kdev: unsupported arch ${arch}";
+  machineArgsLiteral =
+    builtins.concatStringsSep " " (map (s: "'" + s + "'") archCfg.machineArgs);
+in
 writeShellApplication {
-  name = "kdev";
+  name = archCfg.binaryName;
   runtimeInputs = [
-    qemu_kvm
+    archCfg.qemuPkg
     qemu-utils
     virtiofsd
     coreutils
@@ -20,7 +60,14 @@ writeShellApplication {
   text = ''
     set -euo pipefail
 
-    IMAGE_BASE="${vmImage}/${vmImageFileName}"
+    ${imageBaseLine}
+
+    KDEV_ARCH="${arch}"
+    QEMU_BIN="${archCfg.qemuBin}"
+    CONSOLE_DEV="${archCfg.console}"
+    KERNEL_REL_PATH="${archCfg.kernelRelPath}"
+    KVM_CAPABLE=${if archCfg.kvmCapable then "1" else "0"}
+    MACHINE_ARGS=(${machineArgsLiteral})
 
     KERNEL=""
     INITRD=""
@@ -51,12 +98,14 @@ writeShellApplication {
 
     usage() {
       cat <<'EOF'
-    Usage: kdev [options] [-- extra-qemu-args...]
+    Usage: ${archCfg.binaryName} [options] [-- extra-qemu-args...]
+
+      Guest arch: ${arch} (qemu binary: ${archCfg.qemuBin})
 
       -k, --kernel PATH     Kernel image. Default: walks up from PWD to a kernel
                             tree root (Kbuild + MAINTAINERS), then tries
-                            <tree>/build/arch/x86/boot/bzImage. Also accepts
-                            ./arch/x86/boot/bzImage or ./build/arch/x86/boot/bzImage
+                            <tree>/build/${archCfg.kernelRelPath}. Also accepts
+                            ./${archCfg.kernelRelPath} or ./build/${archCfg.kernelRelPath}
                             if you're already in a tree or build dir.
           --initrd PATH     Initrd to pass to -initrd (default: none; requires drivers =y)
       -i, --image PATH      Base qcow2 rootfs (default: nix-store vm-image)
@@ -116,10 +165,10 @@ writeShellApplication {
         gdb <build>/vmlinux -ex 'target remote :<port>'
       (run `make scripts_gdb` in the kernel tree once to build the lx-* helpers.)
 
-    QEMU internal tracing (requires --tcg):
-      kdev --tcg -- -d mmu,int -D /tmp/qemu-trace.log
+    QEMU internal tracing (requires --tcg, or implicit for non-native arch):
+      ${archCfg.binaryName} --tcg -- -d mmu,int -D /tmp/qemu-trace.log
       Useful -d knobs: int, mmu, page, exec, in_asm, cpu_reset, guest_errors,
-      unimp. See qemu-system-x86_64 -d help for the full list.
+      unimp. See ${archCfg.qemuBin} -d help for the full list.
     EOF
     }
 
@@ -156,7 +205,7 @@ writeShellApplication {
 
     if [ -z "$KERNEL" ]; then
       # PWD-relative — works when $PWD is a tree root or a build dir.
-      for c in ./arch/x86/boot/bzImage ./build/arch/x86/boot/bzImage; do
+      for c in "./$KERNEL_REL_PATH" "./build/$KERNEL_REL_PATH"; do
         if [ -f "$c" ]; then KERNEL="$c"; break; fi
       done
     fi
@@ -165,10 +214,10 @@ writeShellApplication {
       dir="$PWD"
       while [ "$dir" != "/" ]; do
         if [ -f "$dir/Kbuild" ] && [ -f "$dir/MAINTAINERS" ]; then
-          if [ -f "$dir/build/arch/x86/boot/bzImage" ]; then
-            KERNEL="$dir/build/arch/x86/boot/bzImage"
-          elif [ -f "$dir/arch/x86/boot/bzImage" ]; then
-            KERNEL="$dir/arch/x86/boot/bzImage"
+          if [ -f "$dir/build/$KERNEL_REL_PATH" ]; then
+            KERNEL="$dir/build/$KERNEL_REL_PATH"
+          elif [ -f "$dir/$KERNEL_REL_PATH" ]; then
+            KERNEL="$dir/$KERNEL_REL_PATH"
           fi
           break
         fi
@@ -183,6 +232,11 @@ writeShellApplication {
 
     if [ -z "$IMAGE" ]; then
       IMAGE="$IMAGE_BASE"
+    fi
+    if [ -z "$IMAGE" ]; then
+      echo "kdev: no rootfs image set." >&2
+      echo "kdev: pass --image PATH, or set KDEV_VM_IMAGE, or run via 'nix run .#vm-$KDEV_ARCH'." >&2
+      exit 1
     fi
     if [ ! -f "$IMAGE" ]; then
       echo "kdev: base image not found: $IMAGE" >&2
@@ -264,7 +318,7 @@ writeShellApplication {
       DISK_ARGS+=(-drive "file=$IMAGE,format=qcow2,if=virtio,snapshot=on")
     fi
 
-    FULL_APPEND="console=ttyS0,115200 root=$ROOT rootfstype=ext4 rootwait init=/nix/var/nix/profiles/system/init"
+    FULL_APPEND="console=$CONSOLE_DEV,115200 root=$ROOT rootfstype=ext4 rootwait init=/nix/var/nix/profiles/system/init"
     if [ "$GDB_ENABLED" -eq 1 ]; then
       FULL_APPEND="$FULL_APPEND nokaslr"
     fi
@@ -412,10 +466,15 @@ writeShellApplication {
       -numa   "node,memdev=mem"
     )
 
-    # KVM by default; --tcg swaps in software emulation with a TCG-compatible CPU.
-    if [ "$TCG" -eq 1 ]; then
+    # KVM by default when the host arch matches the guest arch; otherwise TCG
+    # (foreign-arch emulation). --tcg forces TCG even when KVM is available.
+    if [ "$KVM_CAPABLE" -eq 0 ] || [ "$TCG" -eq 1 ]; then
       ACCEL_ARGS=(-cpu max)
-      echo "kdev: TCG mode; boot will be slow. Pass -- -d <opts> -D <log> for tracing." >&2
+      if [ "$KVM_CAPABLE" -eq 0 ]; then
+        [ "$QUIET" -eq 1 ] || echo "kdev: $KDEV_ARCH guest under TCG (no KVM on this host); boot will be slow." >&2
+      else
+        echo "kdev: TCG mode; boot will be slow. Pass -- -d <opts> -D <log> for tracing." >&2
+      fi
     else
       ACCEL_ARGS=(-enable-kvm -cpu host)
     fi
@@ -471,7 +530,8 @@ writeShellApplication {
     # shellcheck disable=SC2054  # qemu option values contain commas; that's intentional
     QEMU_INVOKE=(
       "''${QEMU_PREFIX[@]}"
-      qemu-system-x86_64
+      "$QEMU_BIN"
+      "''${MACHINE_ARGS[@]}"
       "''${ACCEL_ARGS[@]}"
       -smp "$CORES"
       "''${MEM_ARGS[@]}"
