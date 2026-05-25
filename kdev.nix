@@ -318,7 +318,14 @@ writeShellApplication {
       DISK_ARGS+=(-drive "file=$IMAGE,format=qcow2,if=virtio,snapshot=on")
     fi
 
-    FULL_APPEND="console=$CONSOLE_DEV,115200 root=$ROOT rootfstype=ext4 rootwait init=/nix/var/nix/profiles/system/init"
+    # Use NixOS's stage-2 wrapper (prepare-root) as init, not the systemd
+    # binary at .../system/init. prepare-root sets up /run/current-system
+    # and /run/booted-system before exec'ing systemd; without it, /etc/passwd's
+    # shell path /run/current-system/sw/bin/bash is dangling and login fails
+    # ("Cannot execute /run/current-system/sw/bin/bash"). We skip this in
+    # normal NixOS boot because initrd-stage-1 handles it, but kdev boots
+    # directly with -kernel (no initrd).
+    FULL_APPEND="console=$CONSOLE_DEV,115200 root=$ROOT rootfstype=ext4 rootwait init=/nix/var/nix/profiles/system/prepare-root"
     if [ "$GDB_ENABLED" -eq 1 ]; then
       FULL_APPEND="$FULL_APPEND nokaslr"
     fi
