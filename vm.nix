@@ -17,6 +17,14 @@ in
   image.baseName = "kernel-vm";
   virtualisation.diskSize = 32 * 1024;
 
+  # Bake /etc/machine-id into the image. Without this, systemd refuses to
+  # create one on first boot when /etc is read-only (which is true for our
+  # ephemeral -snapshot rootfs), and dbus-broker fails in launcher_run_child
+  # → sd_id128_get_machine() with ENOENT. The cascade: dbus dies, every
+  # systemctl/poweroff/D-Bus call waits 90s on systemd's default dbus
+  # timeout, and boot crawls past "Started D-Bus" for several minutes.
+  environment.etc."machine-id".text = "0123456789abcdef0123456789abcdef\n";
+
   boot.kernelParams = [
     "console=${serialConsole}"
     "console=tty0"
