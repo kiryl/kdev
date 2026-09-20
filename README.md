@@ -215,8 +215,9 @@ emulation overhead manageable.
 
 `kdev-aarch64` hands the kernel to QEMU with `-kernel`, so PSCI comes from
 QEMU's built-in emulation and there is no EL3. `kdev-aarch64-tfa` boots the
-way hardware does: BL1 from the secure flash, BL2 loads BL31 and the kernel
-from a FIP, and the guest gets EL3, PSCI and SDEI from Trusted Firmware-A.
+way hardware does: BL1 from the secure flash, BL2 loads BL31 from a FIP and
+jumps to the kernel, and the guest gets EL3, PSCI and SDEI from Trusted
+Firmware-A.
 Use it for anything that talks to firmware: SDEI, PSCI corner cases,
 kexec/kdump with firmware in the picture, early-boot handover bugs.
 
@@ -233,9 +234,11 @@ How it differs from the plain aarch64 target:
 
 - The firmware is `packages.tf-a-qemu`, built by `tf-a.nix` from an upstream
   TF-A tag for `PLAT=qemu` with GICv3, SDEI and EL3 exception handling on,
-  plus one pending patch (BL2 publishes the `/firmware/sdei` node). The
-  launcher packs your kernel into the FIP at start, so a kernel change never
-  rebuilds TF-A.
+  plus one pending patch (BL2 publishes the `/firmware/sdei` node). It is
+  built with `PRELOADED_BL33_BASE=0x60000000`: the kernel is not in the FIP,
+  QEMU's generic loader device places it at that address and BL2 jumps
+  there. The firmware never depends on the kernel, and the kernel is not
+  limited by the 64 MiB flash, which a KASAN image exceeds.
 - Without `-kernel` QEMU refuses `-append` and `-initrd`. The launcher dumps
   the DTB QEMU generates for the exact machine, sets `/chosen/bootargs`, and
   for `--initrd` loads the file with the generic loader device above the
@@ -665,8 +668,8 @@ boot. Set `KDEV_NO_PIN=1` to skip that.
   does not bake the image path so it builds without binfmt.
 - `packages.kdev-aarch64-tfa` — same, booting through Trusted Firmware-A
   (see *Firmware boot through TF-A*). Diskless without an image.
-- `packages.tf-a-qemu` — TF-A BL1/BL2/BL31 and fiptool for `PLAT=qemu`,
-  built by `tf-a.nix` from the `trusted-firmware-a` input.
+- `packages.tf-a-qemu` — TF-A BL1, a FIP with BL2/BL31, and fiptool for
+  `PLAT=qemu`, built by `tf-a.nix` from the `trusted-firmware-a` input.
 - `packages.initramfs-aarch64` — static busybox initramfs for diskless
   boots (`initramfs.nix`).
 - `packages.default` — alias for `kdev`.

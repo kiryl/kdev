@@ -10,8 +10,9 @@
   socat,
   dtc,
   arch ? "x86_64",
-  # Output of tf-a.nix: bl1.bin, bl2.bin, bl31.bin and bin/fiptool. Required
-  # for arch = "aarch64-tfa", ignored otherwise.
+  # Output of tf-a.nix: bl1.bin and fip.bin (BL2 + BL31), built to jump to a
+  # preloaded BL33 at 0x60000000. Required for arch = "aarch64-tfa",
+  # ignored otherwise.
   tfaFirmware ? null,
 }:
 let
@@ -54,8 +55,9 @@ let
     else if arch == "aarch64-tfa" then
       {
         # aarch64 booted through Trusted Firmware-A: BL1 runs from the
-        # secure flash, BL2 loads BL31 and the kernel (as BL33) from a FIP,
-        # and the guest gets PSCI, SDEI and EL3 from real firmware.
+        # secure flash, BL2 loads BL31 from a FIP and jumps to the kernel
+        # qemu placed in RAM, and the guest gets PSCI, SDEI and EL3 from
+        # real firmware.
         binaryName = "kdev-aarch64-tfa";
         qemuPkg = qemu;
         qemuBin = "qemu-system-aarch64";
@@ -86,8 +88,9 @@ let
       ''
 
         Firmware boot (${arch}):
-          The kernel is packed into a TF-A FIP as BL33 and boots via -bios, so
-          qemu's -kernel/-append/-initrd are not used; the cmdline and any
+          BL1 and a FIP with BL2 and BL31 boot via -bios; the kernel is placed
+          in RAM by qemu's loader device at the address TF-A jumps to, so
+          qemu's -kernel/-append/-initrd are not used and the cmdline and any
           --initrd go through the device tree instead. With --image (or via
           `nix run .#vm-${arch}`) the NixOS guest boots as usual. Without an
           image the boot is diskless: the kernel runs off an embedded initramfs
@@ -654,19 +657,16 @@ writeShellApplication {
     BOOT_ARGS=(-kernel "$KERNEL" "''${INITRD_ARGS[@]}" -append "$FULL_APPEND")
     if [ -n "$FIRMWARE_TFA" ]; then
       # Firmware boot: BL1 at the start of a 64 MiB flash image (the virt
-      # machine's pflash slots are fixed at that size) and the FIP, holding
-      # BL2, BL31 and the kernel as BL33, at 256 KiB. fiptool comes from the
-      # TF-A build baked into this launcher, so a kernel change never
-      # rebuilds the firmware.
+      # machine's pflash slots are fixed at that size) and the FIP with BL2
+      # and BL31 at 256 KiB. The kernel is not in the flash: TF-A was built
+      # to jump to a BL33 already at KERNEL_LOAD_ADDR, and qemu's generic
+      # loader device puts it there. A debug kernel Image is well over
+      # 64 MiB, which is why it cannot ride in the FIP.
+      KERNEL_LOAD_ADDR=0x60000000
       FLASH="$RUN_TMP/flash.bin"
       install -m0644 "$FIRMWARE_TFA/bl1.bin" "$FLASH"
       truncate -s 64M "$FLASH"
-      "$FIRMWARE_TFA/bin/fiptool" create \
-        --tb-fw "$FIRMWARE_TFA/bl2.bin" \
-        --soc-fw "$FIRMWARE_TFA/bl31.bin" \
-        --nt-fw "$KERNEL" \
-        "$RUN_TMP/fip.bin"
-      dd if="$RUN_TMP/fip.bin" of="$FLASH" bs=64k seek=4 conv=notrunc status=none
+      dd if="$FIRMWARE_TFA/fip.bin" of="$FLASH" bs=64k seek=4 conv=notrunc status=none
 
       # Without -kernel QEMU refuses -append and -initrd, so both go through
       # the device tree: dump the DTB QEMU generates for this exact machine
@@ -678,15 +678,15 @@ writeShellApplication {
         "''${MEM_ARGS[@]}" -bios "$FLASH" -display none \
         -machine "dumpdtb=$DTB" >/dev/null 2>&1
       fdtput -t s "$DTB" /chosen bootargs "$FULL_APPEND"
-      BOOT_ARGS=(-bios "$FLASH" -dtb "$DTB")
+      BOOT_ARGS=(-bios "$FLASH" -dtb "$DTB"
+                 -device "loader,file=$KERNEL,addr=$KERNEL_LOAD_ADDR,force-raw=on")
 
       if [ -n "$INITRD" ]; then
-        # QEMU's generic loader places the initrd in RAM above the kernel:
-        # BL2 loads BL33 at 0x60000000 on the virt platform, and the arm64
-        # Image header says how much room the kernel needs past that.
+        # The initrd goes above the kernel: the arm64 Image header says how
+        # much room the kernel needs past its load address.
         image_size=$(od -An -t u8 -j16 -N8 "$KERNEL" | tr -d ' ')
         initrd_size=$(stat -c %s "$INITRD")
-        initrd_addr=$(( (0x60000000 + image_size + 0x4000000 + 0x1fffff) & ~0x1fffff ))
+        initrd_addr=$(( (KERNEL_LOAD_ADDR + image_size + 0x4000000 + 0x1fffff) & ~0x1fffff ))
         initrd_end=$(( initrd_addr + initrd_size ))
         ram_end=$(( 0x40000000 + MEMORY * 1024 * 1024 ))
         if [ "$initrd_end" -gt "$ram_end" ]; then

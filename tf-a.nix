@@ -4,9 +4,12 @@
 # exception handling framework on, so a kernel that speaks SDEI finds real
 # firmware behind it; both are plain make flags and can be turned off.
 #
-# Output layout: $out/{bl1,bl2,bl31}.{bin,elf} and $out/bin/fiptool. FIP
-# assembly is not done here: kdev packs the kernel as BL33 at launch, so a
-# kernel change never rebuilds the firmware.
+# Output layout: $out/{bl1,bl2,bl31}.{bin,elf}, $out/fip.bin holding BL2 and
+# BL31, and $out/bin/fiptool. The kernel is not part of the FIP: by default
+# BL2 is told the kernel is already in RAM at preloadedBl33Base and jumps
+# there, and kdev places it with QEMU's generic loader device. That keeps
+# the firmware independent of the kernel and avoids the 64 MiB ceiling of
+# the virt machine's flash, which a debug kernel image exceeds.
 {
   stdenv,
   lib,
@@ -31,15 +34,12 @@
   # override to GICv3 here so the BL31 GIC driver matches the emulated
   # hardware.
   gicVersion ? 3,
-  # When non-null, sets PRELOADED_BL33_BASE so BL2 skips loading BL33
-  # from FIP and jumps straight to this address. On the qemu virt
-  # machine this is awkward in practice: QEMU's `-kernel` load address
-  # (NS_DRAM0_BASE + 0x80000 = 0x40080000) overlaps with TF-A's
-  # ARM_PRELOADED_DTB_BASE region (0x40000000-0x40100000), so the
-  # `-kernel ... -append "..."` route this would enable conflicts with
-  # the DTB. Kept as an option; kdev does not use it and supplies the
-  # kernel cmdline by splicing it into the DTB it passes via -dtb.
-  preloadedBl33Base ? null,
+  # PRELOADED_BL33_BASE: BL2 skips loading BL33 from the FIP and jumps to
+  # this address, where the caller has to have placed the kernel. The
+  # default is NS_IMAGE_OFFSET of the virt platform, the same address BL2
+  # would have loaded it to. Set to null to get a FIP-loaded BL33 instead;
+  # the FIP built here then has to be re-created with --nt-fw.
+  preloadedBl33Base ? "0x60000000",
   extraMakeFlags ? [ ],
 }:
 
@@ -131,6 +131,10 @@ stdenv.mkDerivation {
 
     tfa_make bl1 bl2 bl31
     tfa_make fiptool
+    tools/fiptool/fiptool create \
+      --tb-fw build/${plat}/${buildSubdir}/bl2.bin \
+      --soc-fw build/${plat}/${buildSubdir}/bl31.bin \
+      fip.bin
     runHook postBuild
   '';
 
@@ -144,6 +148,7 @@ stdenv.mkDerivation {
     install -m0644 build/${plat}/${buildSubdir}/bl1.bin    "$out/"
     install -m0644 build/${plat}/${buildSubdir}/bl2.bin    "$out/"
     install -m0644 build/${plat}/${buildSubdir}/bl31.bin   "$out/"
+    install -m0644 fip.bin                                  "$out/"
     install -m0644 build/${plat}/${buildSubdir}/bl1/bl1.elf   "$out/"
     install -m0644 build/${plat}/${buildSubdir}/bl2/bl2.elf   "$out/"
     install -m0644 build/${plat}/${buildSubdir}/bl31/bl31.elf "$out/"
