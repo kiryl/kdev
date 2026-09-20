@@ -101,6 +101,10 @@
             '';
           };
 
+          # Busybox initramfs for diskless aarch64 boots (kdev-aarch64-tfa
+          # --initrd, or CONFIG_INITRAMFS_SOURCE).
+          initramfsAarch64 = pkgs.callPackage ./initramfs.nix { };
+
           kernelNativeDeps = with pkgs; [
             bc
             bintools
@@ -264,6 +268,7 @@
             kdev-aarch64 = kdevAarch64;
             tf-a-qemu = tfaQemu;
             kdev-aarch64-tfa = kdevAarch64Tfa;
+            initramfs-aarch64 = initramfsAarch64;
             syz-config-check = syz.config-check;
             syz-init = syz.init;
             kmake-syz = syz.kmake-syz;
