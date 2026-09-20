@@ -86,6 +86,21 @@
             patches = [ ./patches/tf-a/0001-qemu-bl2-add-firmware-sdei-node-when-SDEI_SUPPORT-1.patch ];
           };
 
+          kdevAarch64Tfa = pkgs.callPackage ./kdev.nix {
+            vmImage = null;
+            vmImageFileName = null;
+            arch = "aarch64-tfa";
+            tfaFirmware = tfaQemu;
+          };
+          kdevAarch64TfaLauncher = pkgs.writeShellApplication {
+            name = "kdev-aarch64-tfa-vm";
+            runtimeInputs = [ kdevAarch64Tfa ];
+            text = ''
+              export KDEV_VM_IMAGE="${vmImageAarch64}/${vmImageAarch64FileName}"
+              exec kdev-aarch64-tfa "$@"
+            '';
+          };
+
           kernelNativeDeps = with pkgs; [
             bc
             bintools
@@ -248,6 +263,7 @@
             vm-image-aarch64 = vmImageAarch64;
             kdev-aarch64 = kdevAarch64;
             tf-a-qemu = tfaQemu;
+            kdev-aarch64-tfa = kdevAarch64Tfa;
             syz-config-check = syz.config-check;
             syz-init = syz.init;
             kmake-syz = syz.kmake-syz;
@@ -260,6 +276,10 @@
           apps.vm-aarch64 = {
             type = "app";
             program = "${kdevAarch64Launcher}/bin/kdev-aarch64-vm";
+          };
+          apps.vm-aarch64-tfa = {
+            type = "app";
+            program = "${kdevAarch64TfaLauncher}/bin/kdev-aarch64-tfa-vm";
           };
           apps.syz-config-check = {
             type = "app";
@@ -296,6 +316,7 @@
               pkgs
               kdev
               kdevAarch64
+              kdevAarch64Tfa
               kmakeWrappers
               testBuildDeps
               ;

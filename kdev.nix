@@ -8,7 +8,11 @@
   virtiofsd,
   coreutils,
   socat,
+  dtc,
   arch ? "x86_64",
+  # Output of tf-a.nix: bl1.bin, bl2.bin, bl31.bin and bin/fiptool. Required
+  # for arch = "aarch64-tfa", ignored otherwise.
+  tfaFirmware ? null,
 }:
 let
   hasEmbeddedImage = vmImage != null && vmImageFileName != null;
@@ -27,7 +31,9 @@ let
         kernelRelPath = "arch/x86/boot/bzImage";
         kernelKind = "bzImage";
         kvmCapable = true;
+        tcgCpu = "max";
         machineArgs = [ ];
+        firmware = null;
       }
     else if arch == "aarch64" then
       {
@@ -38,14 +44,56 @@ let
         kernelRelPath = "arch/arm64/boot/Image";
         kernelKind = "Image";
         kvmCapable = false;
+        tcgCpu = "max";
         machineArgs = [
           "-machine"
           "virt,gic-version=3"
         ];
+        firmware = null;
+      }
+    else if arch == "aarch64-tfa" then
+      {
+        # aarch64 booted through Trusted Firmware-A: BL1 runs from the
+        # secure flash, BL2 loads BL31 and the kernel (as BL33) from a FIP,
+        # and the guest gets PSCI, SDEI and EL3 from real firmware.
+        binaryName = "kdev-aarch64-tfa";
+        qemuPkg = qemu;
+        qemuBin = "qemu-system-aarch64";
+        console = "ttyAMA0";
+        kernelRelPath = "arch/arm64/boot/Image";
+        kernelKind = "Image";
+        kvmCapable = false;
+        # TF-A's CPU support library keys off the MIDR, so -cpu max (an
+        # invented MIDR) does not boot BL1; a Cortex-A57 does.
+        tcgCpu = "cortex-a57";
+        # secure=on enables EL3 and the secure pflash that holds BL1+FIP;
+        # gic-version must match what TF-A was built with (tf-a.nix).
+        machineArgs = [
+          "-machine"
+          "virt,secure=on,gic-version=3"
+        ];
+        firmware =
+          if tfaFirmware == null then throw "kdev: arch=aarch64-tfa requires tfaFirmware" else tfaFirmware;
       }
     else
       throw "kdev: unsupported arch ${arch}";
   machineArgsLiteral = builtins.concatStringsSep " " (map (s: "'" + s + "'") archCfg.machineArgs);
+  firmwareStorePath = if archCfg.firmware == null then "" else toString archCfg.firmware;
+  tfaHelpNote =
+    if archCfg.firmware == null then
+      ""
+    else
+      ''
+
+        Firmware boot (${arch}):
+          The kernel is packed into a TF-A FIP as BL33 and boots via -bios, so
+          qemu's -kernel/-append/-initrd are not used; the cmdline and any
+          --initrd go through the device tree instead. With --image (or via
+          `nix run .#vm-${arch}`) the NixOS guest boots as usual. Without an
+          image the boot is diskless: the kernel runs off an embedded initramfs
+          or --initrd, and --run, --modules-install, --root and the host shares
+          are unavailable. --gdb-wait stops at the first BL1 instruction.
+      '';
 in
 writeShellApplication {
   name = archCfg.binaryName;
@@ -55,6 +103,7 @@ writeShellApplication {
     virtiofsd
     coreutils
     socat
+    dtc
   ];
   text = ''
     set -euo pipefail
@@ -67,12 +116,16 @@ writeShellApplication {
     KERNEL_REL_PATH="${archCfg.kernelRelPath}"
     KVM_CAPABLE=${if archCfg.kvmCapable then "1" else "0"}
     MACHINE_ARGS=(${machineArgsLiteral})
+    FIRMWARE_TFA="${firmwareStorePath}"
+    TCG_CPU="${archCfg.tcgCpu}"
 
     KERNEL=""
     INITRD=""
     IMAGE=""
     APPEND=""
     ROOT="/dev/vda2"
+    ROOT_USED=0
+    DISKLESS=0
     MEMORY="''${VM_MEMORY:-8192}"
     CORES="''${VM_CORES:-8}"
     OVERLAY=""
@@ -173,7 +226,7 @@ writeShellApplication {
     QEMU internal tracing (requires --tcg, or implicit for non-native arch):
       ${archCfg.binaryName} --tcg -- -d mmu,int -D /tmp/qemu-trace.log
       Useful -d knobs: int, mmu, page, exec, in_asm, cpu_reset, guest_errors,
-      unimp. See ${archCfg.qemuBin} -d help for the full list.
+      unimp. See ${archCfg.qemuBin} -d help for the full list.${tfaHelpNote}
     EOF
     }
 
@@ -183,7 +236,7 @@ writeShellApplication {
         --initrd) INITRD="$2"; shift 2 ;;
         -i|--image) IMAGE="$2"; shift 2 ;;
         -a|--append) APPEND="$2"; shift 2 ;;
-        --root) ROOT="$2"; shift 2 ;;
+        --root) ROOT="$2"; ROOT_USED=1; shift 2 ;;
         -m|--memory) MEMORY="$2"; shift 2 ;;
         -c|--cores) CORES="$2"; shift 2 ;;
         -o|--overlay) OVERLAY="$2"; shift 2 ;;
@@ -238,40 +291,60 @@ writeShellApplication {
     if [ -z "$IMAGE" ]; then
       IMAGE="$IMAGE_BASE"
     fi
-    if [ -z "$IMAGE" ]; then
-      echo "kdev: no rootfs image set." >&2
-      echo "kdev: pass --image PATH, or set KDEV_VM_IMAGE, or run via 'nix run .#vm-$KDEV_ARCH'." >&2
-      exit 1
+    if [ -z "$IMAGE" ] && [ -n "$FIRMWARE_TFA" ]; then
+      # Firmware boot without a rootfs: the kernel runs off its initramfs,
+      # embedded or --initrd. Nothing that relies on the NixOS guest applies.
+      DISKLESS=1
+      err=""
+      [ "$ROOT_USED" -eq 1 ]    && err="$err --root"
+      [ -n "$OVERLAY" ]         && err="$err --overlay"
+      [ "$PERSIST" -eq 1 ]      && err="$err --persist"
+      [ -n "$RUN_CMD" ]         && err="$err --run"
+      [ -n "$RUN_SCRIPT" ]      && err="$err --run-script"
+      [ -n "$MODULES_INSTALL" ] && err="$err --modules-install"
+      if [ -n "$err" ]; then
+        echo "kdev: no rootfs image, so this is a diskless firmware boot; these need --image:$err" >&2
+        exit 2
+      fi
+      SHARE_GIT=""
+      SHARE_VAR=""
     fi
-    if [ ! -f "$IMAGE" ]; then
-      echo "kdev: base image not found: $IMAGE" >&2
-      exit 1
-    fi
+    if [ "$DISKLESS" -eq 0 ]; then
+      if [ -z "$IMAGE" ]; then
+        echo "kdev: no rootfs image set." >&2
+        echo "kdev: pass --image PATH, or set KDEV_VM_IMAGE, or run via 'nix run .#vm-$KDEV_ARCH'." >&2
+        exit 1
+      fi
+      if [ ! -f "$IMAGE" ]; then
+        echo "kdev: base image not found: $IMAGE" >&2
+        exit 1
+      fi
 
-    # Pin the rootfs image against `nix-collect-garbage`. Each run refreshes
-    # an indirect GC root at a fixed per-arch path, so the image currently
-    # in use is always protected and the previously pinned one is released
-    # (the symlink is overwritten atomically). Best-effort: skip silently if
-    # the image isn't a store path, the user opted out via KDEV_NO_PIN, or
-    # nix-store isn't reachable.
-    case "$IMAGE" in
-      /nix/store/*)
-        if [ -z "''${KDEV_NO_PIN:-}" ] && command -v nix-store >/dev/null 2>&1; then
-          # Reduce the in-store file path to its top-level store path
-          # (/nix/store/<spec>/...  ->  /nix/store/<spec>) so the whole
-          # image closure is rooted, not just the file.
-          pin_rest="''${IMAGE#/nix/store/}"
-          pin_store="/nix/store/''${pin_rest%%/*}"
-          pin_dir="''${XDG_STATE_HOME:-$HOME/.local/state}/kdev"
-          if mkdir -p "$pin_dir" 2>/dev/null; then
-            nix-store --realise "$pin_store" \
-              --add-root "$pin_dir/vm-image-$KDEV_ARCH" --indirect \
-              >/dev/null 2>&1 \
-              || echo "kdev: warning: could not pin rootfs image as a GC root" >&2
+      # Pin the rootfs image against `nix-collect-garbage`. Each run refreshes
+      # an indirect GC root at a fixed per-arch path, so the image currently
+      # in use is always protected and the previously pinned one is released
+      # (the symlink is overwritten atomically). Best-effort: skip silently if
+      # the image isn't a store path, the user opted out via KDEV_NO_PIN, or
+      # nix-store isn't reachable.
+      case "$IMAGE" in
+        /nix/store/*)
+          if [ -z "''${KDEV_NO_PIN:-}" ] && command -v nix-store >/dev/null 2>&1; then
+            # Reduce the in-store file path to its top-level store path
+            # (/nix/store/<spec>/...  ->  /nix/store/<spec>) so the whole
+            # image closure is rooted, not just the file.
+            pin_rest="''${IMAGE#/nix/store/}"
+            pin_store="/nix/store/''${pin_rest%%/*}"
+            pin_dir="''${XDG_STATE_HOME:-$HOME/.local/state}/kdev"
+            if mkdir -p "$pin_dir" 2>/dev/null; then
+              nix-store --realise "$pin_store" \
+                --add-root "$pin_dir/vm-image-$KDEV_ARCH" --indirect \
+                >/dev/null 2>&1 \
+                || echo "kdev: warning: could not pin rootfs image as a GC root" >&2
+            fi
           fi
-        fi
-        ;;
-    esac
+          ;;
+      esac
+    fi
 
     if [ -z "$KERNEL_BUILD" ]; then
       case "$KERNEL" in
@@ -328,24 +401,26 @@ writeShellApplication {
     fi
 
     DISK_ARGS=()
-    if [ "$PERSIST" -eq 1 ]; then
-      if [[ "$IMAGE" == /nix/store/* ]]; then
-        LOCAL="./kernel-vm.qcow2"
-        if [ ! -f "$LOCAL" ]; then
-          echo "kdev: copying $IMAGE to $LOCAL (one-time)"
-          install -m 0644 "$IMAGE" "$LOCAL"
+    if [ "$DISKLESS" -eq 0 ]; then
+      if [ "$PERSIST" -eq 1 ]; then
+        if [[ "$IMAGE" == /nix/store/* ]]; then
+          LOCAL="./kernel-vm.qcow2"
+          if [ ! -f "$LOCAL" ]; then
+            echo "kdev: copying $IMAGE to $LOCAL (one-time)"
+            install -m 0644 "$IMAGE" "$LOCAL"
+          fi
+          IMAGE="$LOCAL"
         fi
-        IMAGE="$LOCAL"
+        DISK_ARGS+=(-drive "file=$IMAGE,format=qcow2,if=virtio")
+      elif [ -n "$OVERLAY" ]; then
+        if [ ! -f "$OVERLAY" ]; then
+          echo "kdev: creating overlay $OVERLAY (backing file: $IMAGE)"
+          qemu-img create -f qcow2 -F qcow2 -b "$IMAGE" "$OVERLAY" >/dev/null
+        fi
+        DISK_ARGS+=(-drive "file=$OVERLAY,format=qcow2,if=virtio")
+      else
+        DISK_ARGS+=(-drive "file=$IMAGE,format=qcow2,if=virtio,snapshot=on")
       fi
-      DISK_ARGS+=(-drive "file=$IMAGE,format=qcow2,if=virtio")
-    elif [ -n "$OVERLAY" ]; then
-      if [ ! -f "$OVERLAY" ]; then
-        echo "kdev: creating overlay $OVERLAY (backing file: $IMAGE)"
-        qemu-img create -f qcow2 -F qcow2 -b "$IMAGE" "$OVERLAY" >/dev/null
-      fi
-      DISK_ARGS+=(-drive "file=$OVERLAY,format=qcow2,if=virtio")
-    else
-      DISK_ARGS+=(-drive "file=$IMAGE,format=qcow2,if=virtio,snapshot=on")
     fi
 
     # Use NixOS's stage-2 wrapper (prepare-root) as init, not the systemd
@@ -355,7 +430,17 @@ writeShellApplication {
     # ("Cannot execute /run/current-system/sw/bin/bash"). We skip this in
     # normal NixOS boot because initrd-stage-1 handles it, but kdev boots
     # directly with -kernel (no initrd).
-    FULL_APPEND="console=$CONSOLE_DEV,115200 root=$ROOT rootfstype=ext4 rootwait init=/nix/var/nix/profiles/system/prepare-root"
+    if [ "$DISKLESS" -eq 1 ]; then
+      FULL_APPEND="console=$CONSOLE_DEV,115200"
+    else
+      FULL_APPEND="console=$CONSOLE_DEV,115200 root=$ROOT rootfstype=ext4 rootwait init=/nix/var/nix/profiles/system/prepare-root"
+    fi
+    if [ -n "$FIRMWARE_TFA" ]; then
+      # The firmware leaves the virt machine's pl011 set up; earlycon lets
+      # the kernel print from its first line instead of after the driver
+      # probes, which is where firmware-handover problems show up.
+      FULL_APPEND="$FULL_APPEND earlycon=pl011,0x9000000"
+    fi
     if [ "$GDB_ENABLED" -eq 1 ]; then
       FULL_APPEND="$FULL_APPEND nokaslr"
     fi
@@ -380,7 +465,9 @@ writeShellApplication {
         echo "kdev: initrd not found: $INITRD" >&2
         exit 1
       fi
-      INITRD_ARGS+=(-initrd "$INITRD")
+      # In firmware mode the initrd goes through the device tree instead
+      # (see the boot arguments below).
+      [ -n "$FIRMWARE_TFA" ] || INITRD_ARGS+=(-initrd "$INITRD")
     fi
 
     # Virtiofsd sidecars. Sockets live under a tempdir that is cleaned at exit.
@@ -506,7 +593,7 @@ writeShellApplication {
     # KVM by default when the host arch matches the guest arch; otherwise TCG
     # (foreign-arch emulation). --tcg forces TCG even when KVM is available.
     if [ "$KVM_CAPABLE" -eq 0 ] || [ "$TCG" -eq 1 ]; then
-      ACCEL_ARGS=(-cpu max)
+      ACCEL_ARGS=(-cpu "$TCG_CPU")
       if [ "$KVM_CAPABLE" -eq 0 ]; then
         [ "$QUIET" -eq 1 ] || echo "kdev: $KDEV_ARCH guest under TCG (no KVM on this host); boot will be slow." >&2
       else
@@ -564,6 +651,54 @@ writeShellApplication {
       CRASH_LISTENER_PID=$!
     fi
 
+    BOOT_ARGS=(-kernel "$KERNEL" "''${INITRD_ARGS[@]}" -append "$FULL_APPEND")
+    if [ -n "$FIRMWARE_TFA" ]; then
+      # Firmware boot: BL1 at the start of a 64 MiB flash image (the virt
+      # machine's pflash slots are fixed at that size) and the FIP, holding
+      # BL2, BL31 and the kernel as BL33, at 256 KiB. fiptool comes from the
+      # TF-A build baked into this launcher, so a kernel change never
+      # rebuilds the firmware.
+      FLASH="$RUN_TMP/flash.bin"
+      install -m0644 "$FIRMWARE_TFA/bl1.bin" "$FLASH"
+      truncate -s 64M "$FLASH"
+      "$FIRMWARE_TFA/bin/fiptool" create \
+        --tb-fw "$FIRMWARE_TFA/bl2.bin" \
+        --soc-fw "$FIRMWARE_TFA/bl31.bin" \
+        --nt-fw "$KERNEL" \
+        "$RUN_TMP/fip.bin"
+      dd if="$RUN_TMP/fip.bin" of="$FLASH" bs=64k seek=4 conv=notrunc status=none
+
+      # Without -kernel QEMU refuses -append and -initrd, so both go through
+      # the device tree: dump the DTB QEMU generates for this exact machine
+      # (same cpu, smp and memory, so the nodes match), set /chosen/bootargs
+      # and, for an initrd, the linux,initrd-* range, and hand it back with
+      # -dtb. BL2 adds PSCI and its own nodes to it as usual.
+      DTB="$RUN_TMP/qemu.dtb"
+      "$QEMU_BIN" "''${MACHINE_ARGS[@]}" "''${ACCEL_ARGS[@]}" -smp "$CORES" \
+        "''${MEM_ARGS[@]}" -bios "$FLASH" -display none \
+        -machine "dumpdtb=$DTB" >/dev/null 2>&1
+      fdtput -t s "$DTB" /chosen bootargs "$FULL_APPEND"
+      BOOT_ARGS=(-bios "$FLASH" -dtb "$DTB")
+
+      if [ -n "$INITRD" ]; then
+        # QEMU's generic loader places the initrd in RAM above the kernel:
+        # BL2 loads BL33 at 0x60000000 on the virt platform, and the arm64
+        # Image header says how much room the kernel needs past that.
+        image_size=$(od -An -t u8 -j16 -N8 "$KERNEL" | tr -d ' ')
+        initrd_size=$(stat -c %s "$INITRD")
+        initrd_addr=$(( (0x60000000 + image_size + 0x4000000 + 0x1fffff) & ~0x1fffff ))
+        initrd_end=$(( initrd_addr + initrd_size ))
+        ram_end=$(( 0x40000000 + MEMORY * 1024 * 1024 ))
+        if [ "$initrd_end" -gt "$ram_end" ]; then
+          echo "kdev: --initrd does not fit: needs RAM through $(printf '0x%x' "$initrd_end"), guest ends at $(printf '0x%x' "$ram_end"); raise --memory" >&2
+          exit 1
+        fi
+        fdtput -t x "$DTB" /chosen linux,initrd-start "$(printf '0x%x' "$initrd_addr")"
+        fdtput -t x "$DTB" /chosen linux,initrd-end "$(printf '0x%x' "$initrd_end")"
+        BOOT_ARGS+=(-device "loader,file=$INITRD,addr=$(printf '0x%x' "$initrd_addr"),force-raw=on")
+      fi
+    fi
+
     # shellcheck disable=SC2054  # qemu option values contain commas; that's intentional
     QEMU_INVOKE=(
       "''${QEMU_PREFIX[@]}"
@@ -572,9 +707,7 @@ writeShellApplication {
       "''${ACCEL_ARGS[@]}"
       -smp "$CORES"
       "''${MEM_ARGS[@]}"
-      -kernel "$KERNEL"
-      "''${INITRD_ARGS[@]}"
-      -append "$FULL_APPEND"
+      "''${BOOT_ARGS[@]}"
       "''${DISK_ARGS[@]}"
       "''${QEMU_CONSOLE_ARGS[@]}"
       -nic user,model=virtio-net-pci

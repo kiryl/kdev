@@ -2,6 +2,7 @@
   pkgs,
   kdev,
   kdevAarch64,
+  kdevAarch64Tfa,
   kmakeWrappers,
   testBuildDeps,
   syzConfigCheck,
@@ -24,6 +25,16 @@ let
     runCommand name { } ''
       set -euo pipefail
       KDEV=${kdevAarch64}/bin/kdev-aarch64
+      ${script}
+      mkdir -p $out
+      : > $out/ok
+    '';
+
+  mkKdevAarch64TfaCheck =
+    name: script:
+    runCommand name { } ''
+      set -euo pipefail
+      KDEV=${kdevAarch64Tfa}/bin/kdev-aarch64-tfa
       ${script}
       mkdir -p $out
       : > $out/ok
@@ -250,6 +261,30 @@ in
     grep -q "KDEV_VM_IMAGE" out.log
   '';
 
+  kdev-aarch64-tfa-help = mkKdevAarch64TfaCheck "kdev-aarch64-tfa-help" ''
+    $KDEV --help > help.out
+    grep -q "Guest arch: aarch64-tfa" help.out
+    grep -q "qemu-system-aarch64" help.out
+    grep -q "Firmware boot" help.out
+  '';
+
+  kdev-aarch64-tfa-diskless-rejects-run = mkKdevAarch64TfaCheck "kdev-aarch64-tfa-diskless-rejects-run" ''
+    : > fake-Image
+    if $KDEV --kernel $PWD/fake-Image --run true > out.log 2>&1; then
+      echo "expected non-zero exit for --run without an image"; exit 1
+    fi
+    grep -q "need --image: --run" out.log
+  '';
+
+  kdev-aarch64-tfa-diskless-rejects-root = mkKdevAarch64TfaCheck "kdev-aarch64-tfa-diskless-rejects-root" ''
+    : > fake-Image
+    if $KDEV --kernel $PWD/fake-Image --root /dev/vda1 --modules-install /nope > out.log 2>&1; then
+      echo "expected non-zero exit for --root without an image"; exit 1
+    fi
+    grep -q -- "--root" out.log
+    grep -q -- "--modules-install" out.log
+  '';
+
   cross-aarch64-produces-arm64-elf =
     let
       cross = pkgs.pkgsCross.aarch64-multiplatform;
@@ -271,34 +306,35 @@ in
         cp result.txt $out/
       '';
 
-  kmake-aarch64-sets-vars-and-cross-builds = runCommand "kmake-aarch64-sets-vars-and-cross-builds"
-    {
-      nativeBuildInputs = kmakeWrappers ++ [ pkgs.file ];
-    }
-    ''
-      set -euo pipefail
-      printf '%s\n' \
-        '.RECIPEPREFIX := >' \
-        'all: hello.o' \
-        'hello.o: hello.c' \
-        '>$(CROSS_COMPILE)gcc -c -o $@ $<' \
-        'show:' \
-        '>@echo "ARCH=$(ARCH)"' \
-        '>@echo "CROSS_COMPILE=$(CROSS_COMPILE)"' \
-        > Makefile
-      echo 'int kernel_like(void) { return 0; }' > hello.c
+  kmake-aarch64-sets-vars-and-cross-builds =
+    runCommand "kmake-aarch64-sets-vars-and-cross-builds"
+      {
+        nativeBuildInputs = kmakeWrappers ++ [ pkgs.file ];
+      }
+      ''
+        set -euo pipefail
+        printf '%s\n' \
+          '.RECIPEPREFIX := >' \
+          'all: hello.o' \
+          'hello.o: hello.c' \
+          '>$(CROSS_COMPILE)gcc -c -o $@ $<' \
+          'show:' \
+          '>@echo "ARCH=$(ARCH)"' \
+          '>@echo "CROSS_COMPILE=$(CROSS_COMPILE)"' \
+          > Makefile
+        echo 'int kernel_like(void) { return 0; }' > hello.c
 
-      kmake-aarch64 show > vars.txt
-      grep -q '^ARCH=arm64$' vars.txt
-      grep -q '^CROSS_COMPILE=aarch64-unknown-linux-gnu-$' vars.txt
+        kmake-aarch64 show > vars.txt
+        grep -q '^ARCH=arm64$' vars.txt
+        grep -q '^CROSS_COMPILE=aarch64-unknown-linux-gnu-$' vars.txt
 
-      kmake-aarch64
-      file hello.o | tee result.txt
-      grep -q "ARM aarch64" result.txt
+        kmake-aarch64
+        file hello.o | tee result.txt
+        grep -q "ARM aarch64" result.txt
 
-      mkdir -p $out
-      cp vars.txt result.txt $out/
-    '';
+        mkdir -p $out
+        cp vars.txt result.txt $out/
+      '';
 
   test-tools-interp-matches-pkgs-glibc =
     runCommand "test-tools-interp-matches-pkgs-glibc"
