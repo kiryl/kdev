@@ -8,6 +8,9 @@ cross-compile shells for every arch kbuild CI covers, and debug tooling.
 - `nix run .#vm` — boots your freshly-built kernel in ~2 s against a stable
   NixOS rootfs (no image rebuild on kernel change). Direct `-kernel` boot, no
   initrd required.
+- `nix run .#vm-aarch64-tfa` — boots an arm64 kernel through Trusted
+  Firmware-A (real EL3, PSCI and SDEI), with the NixOS rootfs or diskless
+  with a busybox initramfs.
 - `nix develop` — native build + debug shell (`gdb`, `drgn`, `bpftrace`,
   `trace-cmd`, `bpftools`, `pahole`, `perf`, `strace`, `clang`/`lld`, qemu).
 - `nix develop .#<arch>` — cross-compile shells with `ARCH` and
@@ -207,6 +210,46 @@ On an x86_64 host you need one of:
 Boot time under TCG is significantly slower than KVM-x86 (expect 10–30s to
 userspace depending on host CPU). Drop `--cores` / `--memory` to keep
 emulation overhead manageable.
+
+### Firmware boot through TF-A
+
+`kdev-aarch64` hands the kernel to QEMU with `-kernel`, so PSCI comes from
+QEMU's built-in emulation and there is no EL3. `kdev-aarch64-tfa` boots the
+way hardware does: BL1 from the secure flash, BL2 loads BL31 and the kernel
+from a FIP, and the guest gets EL3, PSCI and SDEI from Trusted Firmware-A.
+Use it for anything that talks to firmware: SDEI, PSCI corner cases,
+kexec/kdump with firmware in the picture, early-boot handover bugs.
+
+```sh
+# NixOS guest, everything (--run, shares, --crash-dump) as with kdev-aarch64
+nix run ~/git/kdev#vm-aarch64-tfa -- --quiet --run 'dmesg | grep -i sdei'
+
+# diskless: no rootfs, the kernel runs off an initramfs
+nix run ~/git/kdev#kdev-aarch64-tfa -- \
+  --initrd $(nix build --no-link --print-out-paths ~/git/kdev#initramfs-aarch64)/initramfs.cpio.gz
+```
+
+How it differs from the plain aarch64 target:
+
+- The firmware is `packages.tf-a-qemu`, built by `tf-a.nix` from an upstream
+  TF-A tag for `PLAT=qemu` with GICv3, SDEI and EL3 exception handling on,
+  plus one pending patch (BL2 publishes the `/firmware/sdei` node). The
+  launcher packs your kernel into the FIP at start, so a kernel change never
+  rebuilds TF-A.
+- Without `-kernel` QEMU refuses `-append` and `-initrd`. The launcher dumps
+  the DTB QEMU generates for the exact machine, sets `/chosen/bootargs`, and
+  for `--initrd` loads the file with the generic loader device above the
+  kernel and publishes `linux,initrd-start/end`. `--append` and `--gdb`
+  therefore work unchanged; `--gdb-wait` stops at BL1's first instruction.
+- The CPU is a Cortex-A57, not `max`: TF-A's CPU support keys off the MIDR.
+- Without `--image` (or the `vm-aarch64-tfa` app, which supplies the NixOS
+  image) the boot is diskless. The kernel must carry an initramfs, embedded
+  via `CONFIG_INITRAMFS_SOURCE` or passed with `--initrd`, and `--run`,
+  `--modules-install`, `--root`, `--overlay`, `--persist` and the host shares
+  are rejected because nothing in the guest would serve them.
+- `packages.initramfs-aarch64` is a static busybox initramfs that lands in a
+  shell with `/proc`, `/sys` and debugfs mounted. `initramfs.nix` takes
+  `extraInit` and `extraInstall` for a test recipe.
 
 ## Native workflows
 
@@ -620,11 +663,18 @@ boot. Set `KDEV_NO_PIN=1` to skip that.
 - `packages.kdev-aarch64` — qemu wrapper shell script targeting aarch64.
   Image is supplied via `$KDEV_VM_IMAGE` or `--image`; the bare script
   does not bake the image path so it builds without binfmt.
+- `packages.kdev-aarch64-tfa` — same, booting through Trusted Firmware-A
+  (see *Firmware boot through TF-A*). Diskless without an image.
+- `packages.tf-a-qemu` — TF-A BL1/BL2/BL31 and fiptool for `PLAT=qemu`,
+  built by `tf-a.nix` from the `trusted-firmware-a` input.
+- `packages.initramfs-aarch64` — static busybox initramfs for diskless
+  boots (`initramfs.nix`).
 - `packages.default` — alias for `kdev`.
 - `apps.vm` — `nix run .#vm` entry point.
 - `apps.vm-aarch64` — `nix run .#vm-aarch64` entry point. Thin wrapper
   that sets `$KDEV_VM_IMAGE` to the cross-built aarch64 image and
   execs `kdev-aarch64` — building this app triggers the image build.
+- `apps.vm-aarch64-tfa` — the same wrapper around `kdev-aarch64-tfa`.
 - `nixosConfigurations.kernel-vm` — the NixOS config that builds the
   rootfs. Edit `vm.nix` to add guest packages or settings.
 - `nixosConfigurations.kernel-vm-aarch64` — aarch64 variant of the same

@@ -15,6 +15,9 @@ activates the `kdev` devShell via direnv, so the tools below land on
   `kmake-loongarch64`, `kmake-mips64`, `kmake-s390x`, `kmake-arm` —
   cross-compile wrappers. Each bundles a GCC + binutils for that target
   and execs `make` with `ARCH` / `CROSS_COMPILE` preset.
+- `nix run <kdev>#vm-aarch64` / `#vm-aarch64-tfa` — arm64 guests under
+  TCG; the second boots through Trusted Firmware-A (real EL3, PSCI, SDEI).
+  Diskless boots take `--initrd` with `<kdev>#initramfs-aarch64`.
 - `kmake-syz` — `make` wrapper defaulting `O=<tree>/build-syz` for a
   dedicated KCOV+KASAN fuzzing build.
 - `syz-config-check PATH` — audits a `.config` for syzkaller's required
