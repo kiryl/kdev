@@ -45,8 +45,7 @@ let
       }
     else
       throw "kdev: unsupported arch ${arch}";
-  machineArgsLiteral =
-    builtins.concatStringsSep " " (map (s: "'" + s + "'") archCfg.machineArgs);
+  machineArgsLiteral = builtins.concatStringsSep " " (map (s: "'" + s + "'") archCfg.machineArgs);
 in
 writeShellApplication {
   name = archCfg.binaryName;
@@ -151,6 +150,12 @@ writeShellApplication {
 
     Environment:
       VM_MEMORY, VM_CORES   Override defaults without passing flags.
+      KDEV_NO_PIN           Set to skip pinning the rootfs image as a GC root.
+                            By default each run refreshes an indirect GC root at
+                            $XDG_STATE_HOME/kdev/vm-image-<arch> (falling back to
+                            ~/.local/state), so the image in use survives
+                            nix-collect-garbage; the previously pinned image is
+                            released.
 
     Anything after `--` is appended verbatim to the qemu command line.
 
@@ -242,6 +247,31 @@ writeShellApplication {
       echo "kdev: base image not found: $IMAGE" >&2
       exit 1
     fi
+
+    # Pin the rootfs image against `nix-collect-garbage`. Each run refreshes
+    # an indirect GC root at a fixed per-arch path, so the image currently
+    # in use is always protected and the previously pinned one is released
+    # (the symlink is overwritten atomically). Best-effort: skip silently if
+    # the image isn't a store path, the user opted out via KDEV_NO_PIN, or
+    # nix-store isn't reachable.
+    case "$IMAGE" in
+      /nix/store/*)
+        if [ -z "''${KDEV_NO_PIN:-}" ] && command -v nix-store >/dev/null 2>&1; then
+          # Reduce the in-store file path to its top-level store path
+          # (/nix/store/<spec>/...  ->  /nix/store/<spec>) so the whole
+          # image closure is rooted, not just the file.
+          pin_rest="''${IMAGE#/nix/store/}"
+          pin_store="/nix/store/''${pin_rest%%/*}"
+          pin_dir="''${XDG_STATE_HOME:-$HOME/.local/state}/kdev"
+          if mkdir -p "$pin_dir" 2>/dev/null; then
+            nix-store --realise "$pin_store" \
+              --add-root "$pin_dir/vm-image-$KDEV_ARCH" --indirect \
+              >/dev/null 2>&1 \
+              || echo "kdev: warning: could not pin rootfs image as a GC root" >&2
+          fi
+        fi
+        ;;
+    esac
 
     if [ -z "$KERNEL_BUILD" ]; then
       case "$KERNEL" in

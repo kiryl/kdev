@@ -603,6 +603,11 @@ Run `nix run .#vm -- --help` for the full list. Key flags:
 | `--crash-dump PATH` | off | On guest panic, write an ELF core to PATH (drgn-readable). |
 | `--` | | Everything after is appended to the qemu command line. |
 
+Each run pins the rootfs image in use as an indirect GC root under
+`$XDG_STATE_HOME/kdev/vm-image-<arch>` (default `~/.local/state/kdev/`), so
+`nix-collect-garbage` does not delete the image out from under the next
+boot. Set `KDEV_NO_PIN=1` to skip that.
+
 ## Flake outputs
 
 - `devShells.default` — native build + full debug tools.
