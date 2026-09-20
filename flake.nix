@@ -7,6 +7,10 @@
       url = "github:hercules-ci/flake-parts";
       inputs.nixpkgs-lib.follows = "nixpkgs";
     };
+    trusted-firmware-a = {
+      url = "github:ARM-software/arm-trusted-firmware/v2.15.0";
+      flake = false;
+    };
   };
 
   outputs =
@@ -72,6 +76,14 @@
               export KDEV_VM_IMAGE="${vmImageAarch64}/${vmImageAarch64FileName}"
               exec kdev-aarch64 "$@"
             '';
+          };
+
+          # Trusted Firmware-A for QEMU's virt machine, with the one patch
+          # still pending upstream: BL2 publishing the /firmware/sdei node
+          # that the kernel's SDEI driver probes for.
+          tfaQemu = pkgs.callPackage ./tf-a.nix {
+            src = inputs.trusted-firmware-a;
+            patches = [ ./patches/tf-a/0001-qemu-bl2-add-firmware-sdei-node-when-SDEI_SUPPORT-1.patch ];
           };
 
           kernelNativeDeps = with pkgs; [
@@ -235,6 +247,7 @@
             default = kdev;
             vm-image-aarch64 = vmImageAarch64;
             kdev-aarch64 = kdevAarch64;
+            tf-a-qemu = tfaQemu;
             syz-config-check = syz.config-check;
             syz-init = syz.init;
             kmake-syz = syz.kmake-syz;
@@ -275,7 +288,8 @@
               nativeBuildInputs = testBuildDeps;
               buildInputs = testRuntimeDeps;
             };
-          } // lib.mapAttrs mkCrossShell crossArches;
+          }
+          // lib.mapAttrs mkCrossShell crossArches;
 
           checks = import ./checks.nix {
             inherit

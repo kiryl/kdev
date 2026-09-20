@@ -1,0 +1,75 @@
+From 9465a4b7ff13656c75629a678f9a6ab8506fa947 Mon Sep 17 00:00:00 2001
+From: "Kiryl Shutsemau (Meta)" <kas@kernel.org>
+Date: Mon, 1 Jun 2026 11:10:48 +0100
+Subject: [PATCH] qemu/bl2: add /firmware/sdei node when SDEI_SUPPORT=1
+
+Linux's SDEI driver only binds when it finds /firmware/sdei with
+compatible "arm,sdei-1.0" and method "smc" (per
+Documentation/devicetree/bindings/firmware/sdei.yaml). TF-A's QEMU
+platform links SDEI infrastructure into BL31 under SDEI_SUPPORT but
+nothing writes the DT node, so Linux never logs the "sdei: SDEIv1.0
+detected" line even though plat_sdei_setup() ran.
+
+Add the node in BL2's existing update_dt() path. This is the only
+firmware change the SDEI cross-CPU NMI prototype needs: the cross-CPU
+trigger itself is the standard SDEI software-signalled event (event 0)
+plus SDEI_EVENT_SIGNAL, both already provided by the stock QEMU SDEI
+port (SDEI_DEFINE_EVENT_0 in qemu_sdei.c) -- no custom SiP service or
+FID.
+
+Signed-off-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+---
+ plat/qemu/common/qemu_bl2_setup.c | 40 +++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+diff --git a/plat/qemu/common/qemu_bl2_setup.c b/plat/qemu/common/qemu_bl2_setup.c
+index 36c6158aaca5..18c2a4d59d5a 100644
+--- a/plat/qemu/common/qemu_bl2_setup.c
++++ b/plat/qemu/common/qemu_bl2_setup.c
+@@ -106,6 +106,46 @@ static void update_dt(void)
+ 		return;
+ 	}
+ 
++#if SDEI_SUPPORT
++	{
++		/*
++		 * Linux's SDEI driver only binds when it finds /firmware/sdei
++		 * (compatible "arm,sdei-1.0"); TF-A links SDEI into BL31 under
++		 * SDEI_SUPPORT but never writes this node, so add it here. The
++		 * cross-CPU NMI service on top needs no DT advertisement -- the
++		 * kernel discovers it by probing the trigger SMC directly.
++		 */
++		int firmware = fdt_path_offset(fdt, "/firmware");
++		int sdei;
++
++		if (firmware < 0) {
++			firmware = fdt_add_subnode(fdt, 0, "firmware");
++			if (firmware < 0) {
++				ERROR("Failed to add /firmware Device Tree node\n");
++				return;
++			}
++		}
++
++		sdei = fdt_add_subnode(fdt, firmware, "sdei");
++		if (sdei < 0) {
++			ERROR("Failed to add /firmware/sdei Device Tree node\n");
++			return;
++		}
++
++		ret = fdt_setprop_string(fdt, sdei, "compatible", "arm,sdei-1.0");
++		if (ret < 0) {
++			ERROR("Failed to set /firmware/sdei/compatible: %d\n", ret);
++			return;
++		}
++		ret = fdt_setprop_string(fdt, sdei, "method", "smc");
++		if (ret < 0) {
++			ERROR("Failed to set /firmware/sdei/method: %d\n", ret);
++			return;
++		}
++		INFO("Added /firmware/sdei node to Device Tree\n");
++	}
++#endif /* SDEI_SUPPORT */
++
+ #if ENABLE_RMM
+ 	if (fdt_add_reserved_memory(fdt, "rmm", REALM_DRAM_BASE,
+ 				    REALM_DRAM_SIZE)) {

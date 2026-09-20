@@ -39,7 +39,25 @@
     "root": {
       "inputs": {
         "flake-parts": "flake-parts",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "trusted-firmware-a": "trusted-firmware-a"
+      }
+    },
+    "trusted-firmware-a": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1779985789,
+        "narHash": "sha256-pFisArv6snepJ1qWmjckbr0O2Jg4WMhUkN3exgdyb+c=",
+        "owner": "ARM-software",
+        "repo": "arm-trusted-firmware",
+        "rev": "da738d5eae93af342fdc4995dd3c05acb4c9d757",
+        "type": "github"
+      },
+      "original": {
+        "owner": "ARM-software",
+        "ref": "v2.15.0",
+        "repo": "arm-trusted-firmware",
+        "type": "github"
       }
     }
   },
